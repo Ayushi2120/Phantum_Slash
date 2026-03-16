@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Void Reaver: Extreme AR Horror</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Creepster&family=Cinzel:wght@900&family=Outfit:wght@300;600&display=swap');
+
+        body, html {
+            margin: 0; padding: 0;
+            width: 100%; height: 100%;
+            overflow: hidden;
+            background-color: #050005;
+            color: #e2e2e2;
+            font-family: 'Outfit', sans-serif;
+            user-select: none;
+        }
+
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #video-input { display: none; }
+        
+        .horror-font { font-family: 'Creepster', cursive; }
+        
+        /* UI Styling */
+        .game-ui {
+            position: absolute; inset: 0;
+            pointer-events: none;
+            z-index: 50;
+            display: flex; flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+        }
+
+        .heart-container { display: flex; gap: 10px; }
+        .heart { 
+            font-size: 2.5rem; 
+            filter: drop-shadow(0 0 10px #ef4444);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        .heart.lost { transform: scale(0); opacity: 0; }
+
+        .combo-meter {
+            text-align: center;
+            opacity: 0;
+            transform: scale(0.5);
+            transition: all 0.2s;
+        }
+        .combo-meter.active { opacity: 1; transform: scale(1.2); }
+
+        #boss-ui {
+            position: absolute; top: 80px; left: 50%;
+            transform: translateX(-50%);
+            width: 80%; max-width: 500px;
+            display: none;
+        }
+
+        .bar-container { height: 10px; background: rgba(0,0,0,0.8); border: 1px solid #450a0a; overflow: hidden; }
+        .bar-fill { height: 100%; background: linear-gradient(90deg, #7f1d1d, #ef4444); transition: width 0.3s; }
+
+        /* Effects */
+        #flash { position: fixed; inset: 0; pointer-events: none; z-index: 100; opacity: 0; }
+        .vignette {
+            position: fixed; inset: 0; pointer-events: none;
+            box-shadow: inset 0 0 150px rgba(0,0,0,0.9);
+            z-index: 10;
+        }
+
+        .shake { animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both; }
+        @keyframes shake {
+            10%, 90% { transform: translate3d(-2px, 0, 0); }
+            20%, 80% { transform: translate3d(4px, 0, 0); }
+            30%, 50%, 70% { transform: translate3d(-6px, 0, 0); }
+        }
+    </style>
+</head>
+<body>
+
+<div id="flash"></div>
+<div class="vignette"></div>
+
+<!-- Initial Menu -->
+<div id="menu" class="fixed inset-0 bg-black z-[100] flex flex-col items-center justify-center p-6 text-center">
+    <h1 class="horror-font text-8xl text-red-700 mb-2">VOID REAPER</h1>
+    <p class="text-red-300 tracking-widest mb-10 italic">"The Abyss Stares Back..."</p>
+    
+    <div class="grid grid-cols-1 gap-4 mb-8">
+        <button onclick="startGame('normal')" class="horror-font text-3xl px-12 py-4 border-2 border-red-900 bg-red-950/20 hover:bg-red-800 transition text-red-500 hover:text-white">SURVIVAL BATTLE</button>
+        <button onclick="startGame('timer')" class="horror-font text-3xl px-12 py-4 border-2 border-orange-900 bg-orange-950/20 hover:bg-orange-800 transition text-orange-500 hover:text-white">60s CHALLENGE</button>
+    </div>
+    
+    <p class="text-xs text-red-900/50 uppercase tracking-widest">Requires Camera Access • Close Hand (Fist) to Slash</p>
+</div>
+
+<!-- Game UI -->
+<div class="game-ui">
+    <div class="flex justify-between items-start">
+        <div class="heart-container" id="hearts">
+            <span class="heart">💀</span>
+            <span class="heart">💀</span>
+            <span class="heart">💀</span>
+        </div>
+        <div class="text-right">
+            <div class="horror-font text-red-700 text-xl">HARVESTED</div>
+            <div id="score" class="horror-font text-6xl text-red-500">0</div>
+        </div>
+    </div>
+
+    <div id="boss-ui">
+        <div class="horror-font text-red-600 text-center text-2xl mb-1 tracking-widest">ANCIENT TERROR</div>
+        <div class="bar-container"><div id="boss-hp" class="bar-fill w-full"></div></div>
+    </div>
+
+    <div class="flex justify-between items-end">
+        <div id="timer-ui" class="horror-font text-red-900 text-4xl hidden">00:60</div>
+        <div class="combo-meter" id="combo-container">
+            <div id="combo-count" class="horror-font text-7xl text-white">2X</div>
+            <div class="horror-font text-red-500 text-xl tracking-widest">COMBO</div>
+        </div>
+        <div id="power-indicator" class="horror-font text-yellow-500 text-2xl"></div>
+    </div>
+</div>
+
+<video id="video-input" playsinline></video>
+<canvas id="game-canvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('game-canvas');
+    const ctx = canvas.getContext('2d');
+    const video = document.getElementById('video-input');
+    
+    let state = {
+        active: false,
+        mode: 'normal',
+        hp: 3,
+        score: 0,
+        combo: 0,
+        timeScale: 1.0,
+        timeLeft: 60,
+        frame: 0,
+        bossActive: false,
+        bossHp: 0,
+        enemies: [],
+        particles: [],
+        slashes: [],
+        fogs: [],
+        debris: [],
+        bloodDrips: [], // New state for blood drips
+        swords: {}
+    };
+
+    const MONSTERS = {
+        ghost: { hp: 1, speed: 0.007, pts: 10, size: 320, color: 'rgba(148, 163, 184, 0.4)' },
+        zombie: { hp: 2, speed: 0.004, pts: 20, size: 450, color: '#3f6212' },
+        skeleton: { hp: 1, speed: 0.009, pts: 15, size: 380, color: '#e5e7eb' },
+        demon: { hp: 1, speed: 0.014, pts: 25, size: 500, color: '#0f172a' },
+        boss: { hp: 30, speed: 0.0015, pts: 500, size: 1000, color: '#450a0a' }
+    };
+
+    const audio = new (window.AudioContext || window.webkitAudioContext)();
+    function playSfx(freq, type = 'sine', duration = 0.2, vol = 0.1) {
+        if (!state.active) return;
+        const osc = audio.createOscillator();
+        const g = audio.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audio.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(10, audio.currentTime + duration);
+        g.gain.setValueAtTime(vol, audio.currentTime);
+        g.gain.linearRampToValueAtTime(0, audio.currentTime + duration);
+        osc.connect(g); g.connect(audio.destination);
+        osc.start(); osc.stop(audio.currentTime + duration);
+    }
+
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function startGame(mode) {
+        state.mode = mode;
+        state.active = true;
+        document.getElementById('menu').style.display = 'none';
+        if (mode === 'timer') {
+            document.getElementById('timer-ui').classList.remove('hidden');
+            const timerInt = setInterval(() => {
+                if (!state.active) { clearInterval(timerInt); return; }
+                state.timeLeft--;
+                document.getElementById('timer-ui').innerText = `00:${state.timeLeft.toString().padStart(2, '0')}`;
+                if (state.timeLeft <= 0) endGame();
+            }, 1000);
+        }
+        for(let i=0; i<40; i++) state.fogs.push(new Fog());
+        cam.start();
+    }
+
+    class Fog {
+        constructor() { this.reset(); this.x = Math.random() * canvas.width; }
+        reset() {
+            this.x = -300; this.y = Math.random() * canvas.height;
+            this.vx = Math.random() * 2 + 0.5;
+            this.size = Math.random() * 300 + 200;
+            this.alpha = Math.random() * 0.1 + 0.05;
+        }
+        update() { this.x += this.vx * state.timeScale; if (this.x > canvas.width + 300) this.reset(); }
+        draw() {
+            ctx.save(); ctx.globalAlpha = this.alpha;
+            const g = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.size);
+            g.addColorStop(0, '#222'); g.addColorStop(1, 'transparent');
+            ctx.fillStyle = g; ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class Debris {
+        constructor(x, y, vx, vy, color, size, angle) {
+            this.x = x; this.y = y; this.vx = vx; this.vy = vy;
+            this.color = color; this.size = size; this.angle = angle;
+            this.va = (Math.random() - 0.5) * 0.4;
+            this.life = 1.0;
+        }
+        update() {
+            this.x += this.vx * state.timeScale; 
+            this.y += this.vy * state.timeScale; 
+            this.vy += 0.4 * state.timeScale;
+            this.angle += this.va * state.timeScale; 
+            this.life -= 0.02 * state.timeScale;
+            return this.life > 0;
+        }
+        draw() {
+            ctx.save();
+            ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+            ctx.globalAlpha = this.life;
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.rect(-this.size/2, -this.size/4, this.size, this.size/2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class BloodDrip {
+        constructor(x, y) {
+            this.x = x; this.y = y;
+            this.vy = Math.random() * 2 + 2;
+            this.size = Math.random() * 3 + 2;
+            this.life = 1.0;
+        }
+        update() {
+            this.y += this.vy * state.timeScale;
+            this.life -= 0.01 * state.timeScale;
+            return this.life > 0;
+        }
+        draw() {
+            ctx.globalAlpha = this.life;
+            ctx.fillStyle = '#800';
+            ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI*2); ctx.fill();
+        }
+    }
+
+    class SlashEffect {
+        constructor(x, y, angle) {
+            this.x = x; this.y = y; this.angle = angle; this.life = 1.0;
+        }
+        update() { this.life -= 0.15 * state.timeScale; return this.life > 0; }
+        draw() {
+            ctx.save();
+            ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+            ctx.globalAlpha = this.life;
+            ctx.shadowBlur = 50; ctx.shadowColor = "#ff0000";
+            ctx.strokeStyle = "rgba(180, 0, 0, 0.9)";
+            ctx.lineWidth = 180 * this.life;
+            ctx.beginPath(); ctx.moveTo(-400, 0); ctx.lineTo(400, 0); ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    class Enemy {
+        constructor(type, isBoss = false) {
+            this.type = type;
+            const config = MONSTERS[type];
+            this.x = Math.random() * (canvas.width * 0.8) + (canvas.width * 0.1);
+            this.y = Math.random() * (canvas.height * 0.6) + (canvas.height * 0.2);
+            this.z = 0.01;
+            this.health = config.hp;
+            this.speed = config.speed;
+            this.color = config.color;
+            this.size = config.size;
+            this.isBoss = isBoss;
+            playSfx(100, 'sawtooth', 0.5, 0.05);
+        }
+
+        update() {
+            this.z += this.speed * state.timeScale;
+            this.currentSize = this.z * this.size;
+            if (this.z > 1.0) { this.damagePlayer(); return false; }
+            return this.health > 0;
+        }
+
+        damagePlayer() {
+            state.hp--;
+            state.combo = 0;
+            updateUI();
+            triggerFlash('#7f1d1d', 0.5);
+            playSfx(50, 'square', 0.4, 0.3);
+            if (state.hp <= 0) endGame();
+        }
+
+        kill(swordAngle) {
+            state.slashes.push(new SlashEffect(this.x, this.y, swordAngle));
+            playSfx(300, 'sawtooth', 0.15);
+            const partCount = this.isBoss ? 25 : 8;
+            for(let i=0; i<partCount; i++) {
+                const angle = swordAngle + (Math.random() - 0.5) * 2;
+                const speed = 15 + Math.random() * 20;
+                state.debris.push(new Debris(
+                    this.x, this.y,
+                    Math.cos(angle) * speed, Math.sin(angle) * speed,
+                    this.color, this.currentSize / 3, Math.random() * Math.PI
+                ));
+            }
+            const pColor = (this.type === 'ghost' || this.type === 'skeleton') ? '#fff' : '#7f1d1d';
+            for(let i=0; i<30; i++) state.particles.push(new Particle(this.x, this.y, pColor));
+        }
+
+        draw() {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            ctx.scale(this.z, this.z);
+            ctx.globalAlpha = 0.3 + this.z * 0.7;
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            if (this.type === 'demon') {
+                ctx.moveTo(0, -100); ctx.lineTo(60, 0); ctx.lineTo(0, 100); ctx.lineTo(-60, 0);
+            } else if (this.type === 'ghost') {
+                ctx.arc(0, -50, 60, Math.PI, 0); ctx.lineTo(60, 100); ctx.lineTo(-60, 100);
+            } else if (this.type === 'boss') {
+                ctx.arc(0, 0, 150, 0, Math.PI*2);
+            } else {
+                ctx.roundRect(-50, -80, 100, 160, 15);
+            }
+            ctx.fill();
+            ctx.fillStyle = this.isBoss ? '#f00' : '#fff';
+            ctx.beginPath(); ctx.arc(-20, -30, 8, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(20, -30, 8, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class Particle {
+        constructor(x, y, color) {
+            this.x = x; this.y = y; this.color = color;
+            const a = Math.random() * Math.PI * 2;
+            const s = Math.random() * 12 + 4;
+            this.vx = Math.cos(a) * s; this.vy = Math.sin(a) * s;
+            this.life = 1.0;
+        }
+        update() {
+            this.x += this.vx * state.timeScale;
+            this.y += this.vy * state.timeScale;
+            this.vy += 0.3 * state.timeScale;
+            this.life -= 0.02 * state.timeScale;
+            return this.life > 0;
+        }
+        draw() {
+            ctx.globalAlpha = this.life;
+            ctx.fillStyle = this.color;
+            ctx.beginPath(); ctx.arc(this.x, this.y, 5, 0, Math.PI*2); ctx.fill();
+        }
+    }
+
+    class Sword {
+        constructor() {
+            this.pos = {x: 0, y: 0}; this.angle = 0; this.vel = 0;
+            this.lastPos = {x: 0, y: 0};
+            this.bladeLength = 800;
+            this.pulse = 0;
+        }
+        update(x, y, angle) {
+            this.lastPos = {...this.pos};
+            this.pos = {x, y};
+            this.angle = angle;
+            this.vel = Math.hypot(x - this.lastPos.x, y - this.lastPos.y);
+            this.pulse += 0.08;
+            
+            // Randomly drip blood while moving fast
+            if (this.vel > 20 && Math.random() > 0.7) {
+                const dripX = this.pos.x + Math.cos(this.angle) * (Math.random() * this.bladeLength);
+                const dripY = this.pos.y + Math.sin(this.angle) * (Math.random() * this.bladeLength);
+                state.bloodDrips.push(new BloodDrip(dripX, dripY));
+            }
+        }
+        draw(ctx, isFist) {
+            if (!isFist) return null;
+            const tx = this.pos.x + Math.cos(this.angle) * this.bladeLength;
+            const ty = this.pos.y + Math.sin(this.angle) * this.bladeLength;
+
+            ctx.save();
+            
+            // Blade Geometry - Serrated/Jagged Horror Edge
+            const perp = this.angle + Math.PI/2;
+            const widthAtBase = 18;
+            const widthAtTip = 4;
+            
+            ctx.beginPath();
+            ctx.moveTo(this.pos.x + Math.cos(perp)*widthAtBase, this.pos.y + Math.sin(perp)*widthAtBase);
+            
+            // Generate serrated edges
+            const segments = 12;
+            for(let i=1; i<=segments; i++) {
+                const t = i / segments;
+                const curW = widthAtBase * (1 - t) + widthAtTip * t;
+                const curX = this.pos.x + Math.cos(this.angle) * (this.bladeLength * t);
+                const curY = this.pos.y + Math.sin(this.angle) * (this.bladeLength * t);
+                
+                // Jagged spike effect
+                const spike = (i % 2 === 0) ? 8 : 0;
+                ctx.lineTo(curX + Math.cos(perp)*(curW + spike), curY + Math.sin(perp)*(curW + spike));
+            }
+
+            ctx.lineTo(tx, ty); // Tip
+
+            for(let i=segments; i>=1; i--) {
+                const t = i / segments;
+                const curW = widthAtBase * (1 - t) + widthAtTip * t;
+                const curX = this.pos.x + Math.cos(this.angle) * (this.bladeLength * t);
+                const curY = this.pos.y + Math.sin(this.angle) * (this.bladeLength * t);
+                
+                const spike = (i % 2 === 0) ? 8 : 0;
+                ctx.lineTo(curX - Math.cos(perp)*(curW + spike), curY - Math.sin(perp)*(curW + spike));
+            }
+            ctx.closePath();
+
+            // Material: Corrupted Obsidian with Blood Stains
+            const grad = ctx.createLinearGradient(
+                this.pos.x - Math.cos(perp)*widthAtBase, this.pos.y - Math.sin(perp)*widthAtBase,
+                this.pos.x + Math.cos(perp)*widthAtBase, this.pos.y + Math.sin(perp)*widthAtBase
+            );
+            
+            grad.addColorStop(0, '#000');
+            grad.addColorStop(0.4, '#151515');
+            grad.addColorStop(0.5, '#200'); // Blood streak in center
+            grad.addColorStop(0.6, '#151515');
+            grad.addColorStop(1, '#000');
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            // Bone-White Serrated Accents
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Pulsing "Void Veins"
+            const pulseAlpha = 0.3 + Math.sin(this.pulse) * 0.2;
+            ctx.shadowBlur = 20 + Math.sin(this.pulse) * 10;
+            ctx.shadowColor = '#f00';
+            ctx.beginPath();
+            ctx.strokeStyle = `rgba(255, 0, 0, ${pulseAlpha})`;
+            ctx.lineWidth = 3;
+            ctx.moveTo(this.pos.x, this.pos.y);
+            // Draw a wiggly vein down the blade
+            for(let i=1; i<=10; i++) {
+                const t = i/10;
+                const off = Math.sin(this.pulse + i) * 10;
+                const vx = this.pos.x + Math.cos(this.angle)*(this.bladeLength*t) + Math.cos(perp)*off;
+                const vy = this.pos.y + Math.sin(this.angle)*(this.bladeLength*t) + Math.sin(perp)*off;
+                ctx.lineTo(vx, vy);
+            }
+            ctx.stroke();
+
+            // Hilt - Twisted Flesh & Bone
+            ctx.save();
+            ctx.translate(this.pos.x, this.pos.y);
+            ctx.rotate(this.angle);
+            
+            // Crossguard - Ribcage-like spikes
+            ctx.fillStyle = '#111';
+            ctx.shadowBlur = 0;
+            ctx.beginPath();
+            ctx.moveTo(0, -100); ctx.lineTo(20, -10); ctx.lineTo(20, 10); ctx.lineTo(0, 100);
+            ctx.lineTo(10, 0); ctx.closePath();
+            ctx.fill();
+            
+            // Blood splatter on guard
+            ctx.fillStyle = '#600';
+            ctx.beginPath(); ctx.arc(10, 30, 15, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(5, -40, 10, 0, Math.PI*2); ctx.fill();
+
+            // Grip: Charred Bone
+            ctx.fillStyle = '#222';
+            ctx.fillRect(-60, -18, 60, 36);
+            ctx.strokeStyle = '#400';
+            ctx.lineWidth = 3;
+            for(let j=1; j<6; j++) {
+                ctx.beginPath(); ctx.moveTo(-j*10, -18); ctx.lineTo(-j*10, 18); ctx.stroke();
+            }
+
+            // Pommel: Pulsing Soul Stone
+            const pommelPulse = 10 + Math.sin(this.pulse * 2) * 8;
+            ctx.shadowColor = '#f00';
+            ctx.shadowBlur = pommelPulse;
+            ctx.fillStyle = '#100';
+            ctx.beginPath(); ctx.arc(-75, 0, 22, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = `rgba(255, 0, 0, ${0.4 + Math.sin(this.pulse*2)*0.3})`;
+            ctx.beginPath(); ctx.arc(-75, 0, 12, 0, Math.PI*2); ctx.fill();
+            
+            ctx.restore();
+
+            ctx.restore();
+            return {tx, ty};
+        }
+    }
+
+    function triggerFlash(color, op) {
+        const f = document.getElementById('flash');
+        f.style.background = color; f.style.opacity = op;
+        document.body.classList.add('shake');
+        setTimeout(() => { f.style.opacity = 0; document.body.classList.remove('shake'); }, 200);
+    }
+
+    function updateUI() {
+        document.getElementById('score').innerText = state.score;
+        const hearts = document.querySelectorAll('.heart');
+        hearts.forEach((h, i) => { if (i >= state.hp) h.classList.add('lost'); });
+        const comboEl = document.getElementById('combo-container');
+        if (state.combo > 1) {
+            comboEl.classList.add('active');
+            document.getElementById('combo-count').innerText = `${state.combo}X`;
+        } else {
+            comboEl.classList.remove('active');
+        }
+        const pInd = document.getElementById('power-indicator');
+        if (state.combo >= 10) pInd.innerText = "💥 ABYSSAL DEVASTATION";
+        else if (state.combo >= 5) pInd.innerText = "🩸 BLOOD FRENZY";
+        else pInd.innerText = "";
+        if (state.bossActive) {
+            document.getElementById('boss-ui').style.display = 'block';
+            document.getElementById('boss-hp').style.width = `${(state.bossHp/MONSTERS.boss.hp)*100}%`;
+        } else {
+            document.getElementById('boss-ui').style.display = 'none';
+        }
+    }
+
+    function spawnBoss() {
+        state.bossActive = true;
+        state.bossHp = MONSTERS.boss.hp;
+        const b = new Enemy('boss', true);
+        b.x = canvas.width / 2; b.y = canvas.height / 2;
+        state.enemies.push(b);
+        triggerFlash('#300', 0.7);
+    }
+
+    function endGame() {
+        state.active = false;
+        alert(`DEATH EMBRACES YOU\nSouls Harvested: ${state.score}`);
+        location.reload();
+    }
+
+    function onResults(results) {
+        if (!state.active) return;
+        state.frame++;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (state.timeScale < 1.0) state.timeScale += 0.01;
+        ctx.save();
+        ctx.scale(-1, 1); ctx.translate(-canvas.width, 0);
+
+        if (results.multiHandLandmarks) {
+            results.multiHandLandmarks.forEach((lm, i) => {
+                const wrist = lm[0]; const palm = lm[9];
+                const wx = (1 - wrist.x) * canvas.width; const wy = wrist.y * canvas.height;
+                const px = (1 - palm.x) * canvas.width; const py = palm.y * canvas.height;
+                if (!state.swords[i]) state.swords[i] = new Sword();
+                const sw = state.swords[i];
+                const isFist = lm[8].y > lm[5].y && lm[12].y > lm[9].y && lm[16].y > lm[13].y;
+                const angle = Math.atan2(py - wy, px - wx);
+                sw.update(wx, wy, angle);
+                const tip = sw.draw(ctx, isFist);
+
+                if (isFist && sw.vel > 10) {
+                    state.enemies.forEach((en, idx) => {
+                        let hit = false;
+                        for (let step = 0; step <= 1; step += 0.2) {
+                            const checkX = sw.pos.x + Math.cos(sw.angle) * (sw.bladeLength * step);
+                            const checkY = sw.pos.y + Math.sin(sw.angle) * (sw.bladeLength * step);
+                            const dist = Math.hypot(checkX - en.x, checkY - en.y);
+                            const hitRadius = en.currentSize * 0.9 + (state.combo >= 10 ? 200 : 0);
+                            if (dist < hitRadius) { hit = true; break; }
+                        }
+
+                        if (hit) {
+                            en.health -= (state.combo >= 5 ? 2 : 1);
+                            if (en.health <= 0) {
+                                en.kill(sw.angle);
+                                if (en.isBoss) {
+                                    state.bossActive = false; state.timeScale = 0.1;
+                                    triggerFlash('#500', 0.9); state.score += MONSTERS.boss.pts;
+                                } else {
+                                    state.score += MONSTERS[en.type].pts; state.combo++;
+                                }
+                                state.enemies.splice(idx, 1);
+                                updateUI();
+                            } else {
+                                playSfx(180, 'sine', 0.1);
+                                for(let j=0; j<5; j++) state.particles.push(new Particle(en.x, en.y, '#900'));
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        ctx.save(); ctx.globalAlpha = 0.4; ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height); ctx.restore();
+
+        if (state.frame % 60 === 0 && !state.bossActive) {
+            if (state.score > 0 && state.score % 500 === 0) spawnBoss();
+            else {
+                const keys = ['ghost', 'zombie', 'skeleton', 'demon'];
+                state.enemies.push(new Enemy(keys[Math.floor(Math.random()*4)]));
+            }
+        }
+
+        state.fogs.forEach(f => { f.update(); f.draw(); });
+        state.bloodDrips = state.bloodDrips.filter(d => d.update());
+        state.particles = state.particles.filter(p => p.update());
+        state.slashes = state.slashes.filter(s => s.update());
+        state.debris = state.debris.filter(d => d.update());
+        state.enemies = state.enemies.filter(e => e.update());
+        
+        state.bloodDrips.forEach(d => d.draw());
+        state.particles.forEach(p => p.draw());
+        state.enemies.forEach(e => e.draw());
+        state.debris.forEach(d => d.draw());
+        state.slashes.forEach(s => s.draw());
+        ctx.restore();
+    }
+
+    const handsDetect = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+    handsDetect.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    handsDetect.onResults(onResults);
+
+    const cam = new Camera(video, {
+        onFrame: async () => { await handsDetect.send({image: video}); },
+        width: 1280, height: 720
+    });
+</script>
+</body>
+</html>
